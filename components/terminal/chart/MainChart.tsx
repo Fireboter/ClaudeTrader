@@ -113,9 +113,9 @@ export default function MainChart() {
                     : 0;
                 const safeCount = phCount < 0 ? 0 : phCount;
 
+                market.setDays(data, safeCount);
                 setDays(data);
                 setPreHistoryCount(safeCount);
-                market.setDays(data, safeCount);
                 setDataTimeRange({
                     from: data[0].time,
                     to:   data[data.length - 1].time,
@@ -203,10 +203,8 @@ export default function MainChart() {
         const mgr = chartMgrRef.current;
         if (!mgr) return;
         mgr.setPreHistoryData(preHistPriceBars);
-        if (mainPriceBars.length > 0) {
-            mgr.setPriceData(mainPriceBars);
-            mgr.setVolumeData(mainVolumeBars);
-        }
+        mgr.setPriceData(mainPriceBars);
+        mgr.setVolumeData(mainVolumeBars);
         if (playbackTime === null && (preHistPriceBars.length + mainPriceBars.length) > 0) {
             mgr.fitContent();
         }
