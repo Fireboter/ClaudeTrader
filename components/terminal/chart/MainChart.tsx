@@ -9,10 +9,12 @@ import { toTVCandle, toTVVolume } from '../core/models/Candle';
 import { PivotOverlay } from './PivotOverlay';
 import { TrendlineOverlay } from './TrendlineOverlay';
 import { EarlyPivotOverlay } from './EarlyPivotOverlay';
+import { SignalOverlay } from './SignalOverlay';
+import { BoundaryOverlay } from './BoundaryOverlay';
 import type { IChartApi } from 'lightweight-charts';
 import axios from 'axios';
 
-const API = 'http://localhost:8000';
+const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:9001';
 
 /**
  * MainChart — always displays daily bars. Minute data is used only to update
@@ -31,6 +33,7 @@ export default function MainChart() {
         pivots, pivotsEnabled,
         trendlines, trendlinesEnabled, trendlineConfig,
         earlyPivots, earlyConfirmedPivots, earlyPivotConfig,
+        signals, activeTrade, tradeAxisConfig,
     } = state;
 
     const containerRef = useRef<HTMLDivElement>(null);
@@ -43,6 +46,7 @@ export default function MainChart() {
     // re-renders when the chart remounts (Strict Mode / symbol change).
     const [candleSeries, setCandleSeries] = useState<ISeriesApi<"Candlestick"> | null>(null);
     const [chartApi,     setChartApi]     = useState<IChartApi | null>(null);
+    const [preHistoryCount, setPreHistoryCount] = useState(0);
 
     const layout   = terminal.store.layout;
     const market   = terminal.store.marketData;
@@ -88,17 +92,35 @@ export default function MainChart() {
             params.seed          = randomSeed;
         }
 
-        axios.get<{ days: DayCandle[] }>(`${API}/api/candles/full`, { params })
+        const stratCfg = terminal.store.layout.strategyConfig;
+        if (stratCfg.preHistoryBars > 0) {
+            params.prehistory_bars = stratCfg.preHistoryBars;
+        }
+
+        axios.get<{ days: DayCandle[]; boundary_time?: number }>(`${API}/api/candles/full`, { params })
             .then(res => {
                 if (cancelled) return;
-                const data = res.data.days ?? [];
+                const data       = res.data.days        ?? [];
+                const boundaryTs = res.data.boundary_time ?? null;
                 if (data.length === 0) {
                     setError(`No data for ${config.symbol} in this range`);
                     return;
                 }
+
+                // Derive preHistoryCount from boundary_time
+                const phCount   = boundaryTs != null
+                    ? data.findIndex((d: { time: number }) => d.time === boundaryTs)
+                    : 0;
+                const safeCount = phCount < 0 ? 0 : phCount;
+
                 setDays(data);
-                market.setDays(data);
-                setDataTimeRange({ from: data[0].time, to: data[data.length - 1].time });
+                setPreHistoryCount(safeCount);
+                market.setDays(data, safeCount);
+                setDataTimeRange({
+                    from: data[0].time,
+                    to:   data[data.length - 1].time,
+                    ...(boundaryTs != null ? { boundaryTime: boundaryTs } : {}),
+                });
             })
             .catch(err => {
                 if (cancelled) return;
@@ -113,7 +135,8 @@ export default function MainChart() {
         return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [config.symbol, config.mode, config.startDate, config.endDate,
-        config.years, config.months, config.days, randomSeed]);
+        config.years, config.months, config.days, randomSeed,
+        state.strategyConfig.preHistoryBars]);
 
     // ─── Compute visible daily bars ───────────────────────────────────────────
     const { priceBars, volumeBars, visibleDays } = useMemo(() => {
@@ -159,14 +182,35 @@ export default function MainChart() {
         };
     }, [days, playbackTime]);
 
+    // ─── Split visible bars into pre-history (grey series) and main ───────────
+    const { preHistPriceBars, mainPriceBars, mainVolumeBars } = useMemo(() => {
+        if (preHistoryCount <= 0 || priceBars.length <= preHistoryCount) {
+            return {
+                preHistPriceBars: [] as typeof priceBars,
+                mainPriceBars:    priceBars,
+                mainVolumeBars:   volumeBars,
+            };
+        }
+        return {
+            preHistPriceBars: priceBars.slice(0, preHistoryCount),
+            mainPriceBars:    priceBars.slice(preHistoryCount),
+            mainVolumeBars:   volumeBars.slice(preHistoryCount),
+        };
+    }, [priceBars, volumeBars, preHistoryCount]);
+
     // ─── Push price/volume data to chart ──────────────────────────────────────
     useEffect(() => {
         const mgr = chartMgrRef.current;
-        if (!mgr || priceBars.length === 0) return;
-        mgr.setPriceData(priceBars);
-        mgr.setVolumeData(volumeBars);
-        if (playbackTime === null) mgr.fitContent();
-    }, [priceBars, volumeBars, playbackTime]);
+        if (!mgr) return;
+        mgr.setPreHistoryData(preHistPriceBars);
+        if (mainPriceBars.length > 0) {
+            mgr.setPriceData(mainPriceBars);
+            mgr.setVolumeData(mainVolumeBars);
+        }
+        if (playbackTime === null && (preHistPriceBars.length + mainPriceBars.length) > 0) {
+            mgr.fitContent();
+        }
+    }, [preHistPriceBars, mainPriceBars, mainVolumeBars, playbackTime]);
 
     // ─── Keyboard navigation ──────────────────────────────────────────────────
     const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -219,9 +263,28 @@ export default function MainChart() {
                 chart={chartApi}
                 series={candleSeries}
                 days={visibleDays}
-                earlyPivots={[...earlyPivots, ...earlyConfirmedPivots]}
+                earlyPivots={[...earlyPivots, ...earlyConfirmedPivots].filter(p => p.dayIndex >= preHistoryCount)}
                 config={earlyPivotConfig}
                 enabled={earlyPivotConfig.enabled}
+            />
+
+            {/* Signal overlay — entry arrows + exit markers + SL/TP price lines */}
+            <SignalOverlay
+                chart={chartApi}
+                series={candleSeries}
+                days={visibleDays}
+                signals={signals}
+                activeTrade={activeTrade}
+                enabled={tradeAxisConfig.useTouchDetection || tradeAxisConfig.useBreakoutDetection}
+                useStopLoss={tradeAxisConfig.useStopLoss}
+                useTakeProfit={tradeAxisConfig.useTakeProfit}
+            />
+
+            {/* Yellow dashed boundary line between pre-history and actual range */}
+            <BoundaryOverlay
+                chart={chartApi}
+                series={candleSeries}
+                boundaryTime={market.boundaryTime}
             />
         </div>
     );
