@@ -111,9 +111,13 @@ def _minute_dict(ts: pd.Timestamp, row: pd.Series) -> dict:
 
 def _load_and_slice(symbol: str, mode: str,
                     start_date: str | None, end_date: str | None,
-                    duration_days: int, seed: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+                    duration_days: int, seed: float) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Returns (daily_sliced, df_1m_sliced) — both covering the same date window.
+    Returns (daily_sliced, df_1m_sliced, daily_full).
+
+    daily_full is the full unsliced daily DataFrame for the symbol; callers
+    that need to look back before the sliced window (e.g. prehistory) can
+    reuse it without re-reading the parquet.
     """
     df_1m  = _load_1m(symbol)
     daily  = _resample_daily(df_1m)
@@ -136,7 +140,7 @@ def _load_and_slice(symbol: str, mode: str,
     max_date = daily_sliced.index.max() + pd.Timedelta(days=1)
     df_1m_sliced = df_1m[(df_1m.index >= min_date) & (df_1m.index < max_date)]
 
-    return daily_sliced, df_1m_sliced
+    return daily_sliced, df_1m_sliced, daily
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -152,7 +156,7 @@ def get_daily_candles(
 ):
     """Return daily OHLCV candles resampled from Databento 1m data."""
     try:
-        daily, _ = _load_and_slice(symbol, mode, start_date, end_date, duration_days, seed)
+        daily, _, _daily_full = _load_and_slice(symbol, mode, start_date, end_date, duration_days, seed)
     except HTTPException:
         raise
     except Exception as e:
@@ -165,46 +169,56 @@ def get_daily_candles(
 
 @router.get("/full")
 def get_full_candles(
-    symbol:        str        = Query(..., description="Asset symbol"),
-    mode:          str        = Query("random", enum=["fixed", "random"]),
-    start_date:    str | None = Query(None,  description="YYYY-MM-DD (fixed mode)"),
-    end_date:      str | None = Query(None,  description="YYYY-MM-DD (fixed mode)"),
-    duration_days: int        = Query(365,   description="Window in calendar days (random mode)"),
-    seed:          float      = Query(0.5,   description="Random seed (random mode)"),
+    symbol:          str        = Query(..., description="Asset symbol"),
+    mode:            str        = Query("random", enum=["fixed", "random"]),
+    start_date:      str | None = Query(None,  description="YYYY-MM-DD (fixed mode)"),
+    end_date:        str | None = Query(None,  description="YYYY-MM-DD (fixed mode)"),
+    duration_days:   int        = Query(365,   description="Window in calendar days (random mode)"),
+    seed:            float      = Query(0.5,   description="Random seed (random mode)"),
+    prehistory_bars: int        = Query(0, ge=0, description="Daily bars to prepend before the range (no minutes)"),
 ):
     """
     Return daily candles with all 1-minute bars embedded under `minutes`.
     Both levels are fully preloaded in a single response.
 
+    When prehistory_bars > 0, daily bars from immediately before the range
+    are prepended with minutes=[] and boundary_time marks where actual data starts.
+
     Response shape:
     {
       "days": [
-        {
-          "time":    <unix seconds — UTC midnight>,
-          "open":    ...,
-          "high":    ...,
-          "low":     ...,
-          "close":   ...,
-          "volume":  ...,
-          "minutes": [
-            { "time": <unix seconds>, "open": ..., "high": ...,
-              "low": ..., "close": ..., "volume": ... },
-            ...
-          ]
-        },
+        { "time": ..., "open": ..., ..., "minutes": [] },   <- pre-history (if any)
         ...
-      ]
+        { "time": <boundary>, ..., "minutes": [ ... ] },    <- actual range starts here
+        ...
+      ],
+      "boundary_time": <unix seconds of first actual day> | null
     }
     """
     try:
-        daily, df_1m = _load_and_slice(symbol, mode, start_date, end_date, duration_days, seed)
+        daily, df_1m, full_daily = _load_and_slice(symbol, mode, start_date, end_date, duration_days, seed)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to load full candles for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Group 1m bars by calendar date string for O(1) lookup
+    # ── Pre-history: daily bars immediately before the main range ──────────────
+    boundary_time: int | None = None
+    prehistory_result: list[dict] = []
+
+    if prehistory_bars > 0 and not daily.empty:
+        range_start = daily.index.min()
+        pre = full_daily[full_daily.index < range_start]
+        # Take the last N trading days
+        pre = pre.iloc[max(0, len(pre) - prehistory_bars):]
+        prehistory_result = [
+            {**_candle_dict(ts, row), "minutes": []}
+            for ts, row in pre.iterrows()
+        ]
+        boundary_time = int(range_start.timestamp())
+
+    # ── Main range: group 1m bars by date ─────────────────────────────────
     df_1m_copy = df_1m.copy()
     df_1m_copy["_date"] = df_1m_copy.index.normalize()
     groups = {str(date.date()): grp.drop(columns=["_date"])
@@ -215,12 +229,11 @@ def get_full_candles(
         day_key = str(ts.date())
         grp     = groups.get(day_key, pd.DataFrame())
         minutes = [_minute_dict(mts, mrow) for mts, mrow in grp.iterrows()] if not grp.empty else []
-
-        entry = _candle_dict(ts, row)
+        entry   = _candle_dict(ts, row)
         entry["minutes"] = minutes
         result.append(entry)
 
-    return {"days": result}
+    return {"days": prehistory_result + result, "boundary_time": boundary_time}
 
 
 @router.get("/available")

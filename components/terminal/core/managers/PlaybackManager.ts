@@ -129,18 +129,28 @@ export class PlaybackManager extends Observable {
     }
 
     private _setFirstMinuteOfDay(dayIdx: number): void {
-        const mins = this.market.days[dayIdx].minutes;
+        const day  = this.market.days[dayIdx];
+        const mins = day.minutes;
         if (mins.length > 0) {
             this.layout.minuteIndex  = 0;
             this.layout.playbackTime = mins[0].time;
+        } else {
+            // Pre-history day: no minutes — park at the day's UTC midnight.
+            this.layout.minuteIndex  = 0;
+            this.layout.playbackTime = day.time;
         }
     }
 
     private _setLastMinuteOfDay(dayIdx: number): void {
-        const mins = this.market.days[dayIdx].minutes;
+        const day  = this.market.days[dayIdx];
+        const mins = day.minutes;
         if (mins.length > 0) {
             this.layout.minuteIndex  = mins.length - 1;
             this.layout.playbackTime = mins[mins.length - 1].time;
+        } else {
+            // Pre-history day: no minutes — park at the day's UTC midnight.
+            this.layout.minuteIndex  = 0;
+            this.layout.playbackTime = day.time;
         }
     }
 

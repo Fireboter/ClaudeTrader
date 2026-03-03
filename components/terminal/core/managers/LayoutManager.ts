@@ -258,7 +258,13 @@ export class LayoutManager extends Observable {
     // Timeline (always enabled — no toggle)
     playTimeline(): void { this.isPlaying = true; this.emit(); }
     pauseTimeline(): void { this.isPlaying = false; this.emit(); }
-    stopTimeline(): void { this.isPlaying = false; this.playbackTime = null; this.emit(); }
+    stopTimeline(): void {
+        this.isPlaying   = false;
+        // Reset to boundary (start of actual range) if pre-history is active,
+        // otherwise fall back to null (free-scroll).
+        this.playbackTime = this.dataTimeRange?.boundaryTime ?? null;
+        this.emit();
+    }
     setPlaybackTime(t: number | null): void { this.playbackTime = t; this.emit(); }
     setPlaybackSpeed(s: number): void { this.playbackSpeed = s; this.emit(); }
 }

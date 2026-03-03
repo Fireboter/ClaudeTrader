@@ -71,7 +71,7 @@ export default function TimelineBar() {
     const handlePlayPause = () => {
         if (isPlaying) { pauseTimeline(); }
         else {
-            if (currentTime >= endTime) setPlaybackTime(startTime);
+            if (currentTime >= endTime) setPlaybackTime(boundaryTime ?? startTime);
             playTimeline();
         }
     };
