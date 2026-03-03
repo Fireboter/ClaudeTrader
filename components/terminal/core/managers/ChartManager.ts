@@ -17,6 +17,7 @@ export class ChartManager {
     chart: IChartApi | null = null;
     candleSeries: ISeriesApi<"Candlestick"> | null = null;
     volumeSeries: ISeriesApi<"Histogram"> | null = null;
+    preHistorySeries: ISeriesApi<"Candlestick"> | null = null;
 
     private layout: LayoutManager;
     private container: HTMLElement | null = null;
@@ -40,6 +41,14 @@ export class ChartManager {
             },
             timeScale: { timeVisible: true, secondsVisible: false },
             crosshair: { mode: 1 },
+        });
+
+        this.preHistorySeries = this.chart.addSeries(CandlestickSeries, {
+            upColor:       '#4b5563',
+            downColor:     '#4b5563',
+            borderVisible: false,
+            wickUpColor:   '#4b5563',
+            wickDownColor: '#4b5563',
         });
 
         this.candleSeries = this.chart.addSeries(CandlestickSeries, {
@@ -71,6 +80,8 @@ export class ChartManager {
     }
 
     unmount(): void {
+        // preHistorySeries is owned by the chart and destroyed with it
+        this.preHistorySeries = null;
         if (this.chart) {
             this.chart.remove();
             this.chart = null;
@@ -87,6 +98,15 @@ export class ChartManager {
     setVolumeData(data: unknown[]): void {
         if (this.volumeSeries) {
             this.volumeSeries.setData(data.length > 0 ? data as Parameters<typeof this.volumeSeries.setData>[0] : []);
+        }
+    }
+
+    setPreHistoryData(data: unknown[]): void {
+        if (!this.preHistorySeries) return;
+        if (data.length > 0) {
+            this.preHistorySeries.setData(data as Parameters<typeof this.preHistorySeries.setData>[0]);
+        } else {
+            this.preHistorySeries.setData([]);
         }
     }
 
