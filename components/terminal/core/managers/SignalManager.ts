@@ -143,7 +143,7 @@ export class SignalManager extends Observable {
         }
 
         // ── Filter early pivots to actual range (exclude pre-history) ─────────
-        const preHistoryCount   = this.market.preHistoryCount;
+        const preHistoryCount   = this.market.preHistoryCount ?? 0;
         const actualRangePivots = this.earlyPivotMgr.confirmedEarlyPivots
             .filter(p => p.dayIndex >= preHistoryCount);
 
