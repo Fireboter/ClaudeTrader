@@ -44,9 +44,10 @@ export default function MainChart() {
     const [error,        setError]        = useState<string | null>(null);
     // Expose the candleSeries reference to PivotOverlay via React state so it
     // re-renders when the chart remounts (Strict Mode / symbol change).
-    const [candleSeries, setCandleSeries] = useState<ISeriesApi<"Candlestick"> | null>(null);
-    const [chartApi,     setChartApi]     = useState<IChartApi | null>(null);
-    const [preHistoryCount, setPreHistoryCount] = useState(0);
+    const [candleSeries,     setCandleSeries]     = useState<ISeriesApi<"Candlestick"> | null>(null);
+    const [preHistorySeries, setPreHistorySeries] = useState<ISeriesApi<"Candlestick"> | null>(null);
+    const [chartApi,         setChartApi]         = useState<IChartApi | null>(null);
+    const [preHistoryCount,  setPreHistoryCount]  = useState(0);
 
     const layout   = terminal.store.layout;
     const market   = terminal.store.marketData;
@@ -59,11 +60,13 @@ export default function MainChart() {
         mgr.mount(containerRef.current);
         chartMgrRef.current = mgr;
         setCandleSeries(mgr.candleSeries);
+        setPreHistorySeries(mgr.preHistorySeries);
         setChartApi(mgr.chart);
         return () => {
             mgr.unmount();
             chartMgrRef.current = null;
             setCandleSeries(null);
+            setPreHistorySeries(null);
             setChartApi(null);
         };
     }, [layout]);
@@ -242,8 +245,10 @@ export default function MainChart() {
             {/* Renderless — attaches pivot markers to the chart */}
             <PivotOverlay
                 series={candleSeries}
+                preHistorySeries={preHistorySeries}
                 pivots={pivots}
                 enabled={pivotsEnabled}
+                preHistoryCount={preHistoryCount}
             />
 
             {/* SVG trendline overlay */}
