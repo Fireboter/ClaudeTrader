@@ -111,9 +111,13 @@ def _minute_dict(ts: pd.Timestamp, row: pd.Series) -> dict:
 
 def _load_and_slice(symbol: str, mode: str,
                     start_date: str | None, end_date: str | None,
-                    duration_days: int, seed: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+                    duration_days: int, seed: float) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Returns (daily_sliced, df_1m_sliced) — both covering the same date window.
+    Returns (daily_sliced, df_1m_sliced, daily_full).
+
+    daily_full is the full unsliced daily DataFrame for the symbol; callers
+    that need to look back before the sliced window (e.g. prehistory) can
+    reuse it without re-reading the parquet.
     """
     df_1m  = _load_1m(symbol)
     daily  = _resample_daily(df_1m)
@@ -136,7 +140,7 @@ def _load_and_slice(symbol: str, mode: str,
     max_date = daily_sliced.index.max() + pd.Timedelta(days=1)
     df_1m_sliced = df_1m[(df_1m.index >= min_date) & (df_1m.index < max_date)]
 
-    return daily_sliced, df_1m_sliced
+    return daily_sliced, df_1m_sliced, daily
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -152,7 +156,7 @@ def get_daily_candles(
 ):
     """Return daily OHLCV candles resampled from Databento 1m data."""
     try:
-        daily, _ = _load_and_slice(symbol, mode, start_date, end_date, duration_days, seed)
+        daily, _, _daily_full = _load_and_slice(symbol, mode, start_date, end_date, duration_days, seed)
     except HTTPException:
         raise
     except Exception as e:
@@ -192,7 +196,7 @@ def get_full_candles(
     }
     """
     try:
-        daily, df_1m = _load_and_slice(symbol, mode, start_date, end_date, duration_days, seed)
+        daily, df_1m, full_daily = _load_and_slice(symbol, mode, start_date, end_date, duration_days, seed)
     except HTTPException:
         raise
     except Exception as e:
@@ -205,8 +209,6 @@ def get_full_candles(
 
     if prehistory_bars > 0 and not daily.empty:
         range_start = daily.index.min()
-        # Load all daily bars for the symbol (unsliced) to look back before range_start
-        full_daily = _resample_daily(_load_1m(symbol))
         pre = full_daily[full_daily.index < range_start]
         # Take the last N trading days
         pre = pre.iloc[max(0, len(pre) - prehistory_bars):]
@@ -214,7 +216,7 @@ def get_full_candles(
             {**_candle_dict(ts, row), "minutes": []}
             for ts, row in pre.iterrows()
         ]
-        boundary_time = int(daily.index[0].timestamp())
+        boundary_time = int(range_start.timestamp())
 
     # ── Main range: group 1m bars by date ─────────────────────────────────
     df_1m_copy = df_1m.copy()
