@@ -72,7 +72,7 @@ export class PlaybackManager extends Observable {
         if (days.length === 0) return;
 
         const target = dayIdx < 0 ? days.length - 1 : Math.min(dayIdx + 1, days.length - 1);
-        this._setFirstMinuteOfDay(target);
+        this._setLastMinuteOfDay(target);
         this._emit();
     }
 

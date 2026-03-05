@@ -22,6 +22,17 @@ export class ChartManager {
     private layout: LayoutManager;
     private container: HTMLElement | null = null;
 
+    /**
+     * Track previous bar counts so we can use series.update() instead of
+     * series.setData() when only the last bar was added or modified.
+     * series.update() is O(1) — it only touches the last bar.
+     * series.setData() is O(N) — re-processes every bar and re-renders the chart.
+     * Using update() during playback reduces per-keypress cost from O(N) to O(1).
+     */
+    private _prevPriceLen   = 0;
+    private _prevVolLen     = 0;
+    private _prevPreHistLen = -1;   // -1 = never set; always run setData on first call
+
     constructor(layout: LayoutManager) {
         this.layout = layout;
     }
@@ -90,24 +101,74 @@ export class ChartManager {
     }
 
     setPriceData(data: unknown[]): void {
-        if (this.candleSeries && data.length > 0) {
+        if (!this.candleSeries) return;
+
+        if (data.length === 0) {
+            // Symbol cleared — reset the series and the counter
+            if (this._prevPriceLen > 0) {
+                this.candleSeries.setData([]);
+                this._prevPriceLen = 0;
+            }
+            return;
+        }
+
+        // Incremental path: bars only added (+1) or the last bar was updated (same count).
+        // series.update() replaces/appends the last bar in O(1) without re-rendering all N bars.
+        // Full setData() is needed when bars are removed (backward navigation) or on initial load.
+        const isIncremental =
+            this._prevPriceLen > 0 &&
+            data.length >= this._prevPriceLen &&
+            data.length <= this._prevPriceLen + 1;
+
+        if (isIncremental) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            this.candleSeries.update((data as any)[data.length - 1]);
+        } else {
             this.candleSeries.setData(data as Parameters<typeof this.candleSeries.setData>[0]);
         }
+        this._prevPriceLen = data.length;
     }
 
     setVolumeData(data: unknown[]): void {
-        if (this.volumeSeries) {
-            this.volumeSeries.setData(data.length > 0 ? data as Parameters<typeof this.volumeSeries.setData>[0] : []);
+        if (!this.volumeSeries) return;
+
+        if (data.length === 0) {
+            if (this._prevVolLen > 0) {
+                this.volumeSeries.setData([]);
+                this._prevVolLen = 0;
+            }
+            return;
         }
+
+        const isIncremental =
+            this._prevVolLen > 0 &&
+            data.length >= this._prevVolLen &&
+            data.length <= this._prevVolLen + 1;
+
+        if (isIncremental) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            this.volumeSeries.update((data as any)[data.length - 1]);
+        } else {
+            this.volumeSeries.setData(data as Parameters<typeof this.volumeSeries.setData>[0]);
+        }
+        this._prevVolLen = data.length;
     }
 
     setPreHistoryData(data: unknown[]): void {
         if (!this.preHistorySeries) return;
-        if (data.length > 0) {
-            this.preHistorySeries.setData(data as Parameters<typeof this.preHistorySeries.setData>[0]);
-        } else {
-            this.preHistorySeries.setData([]);
-        }
+
+        // Pre-history bars are static during playback — the first preHistoryCount
+        // bars never change while the user steps through minutes.  Skip the
+        // setData() call when the length is unchanged to avoid an O(N) redraw
+        // on every playback step.
+        if (data.length === this._prevPreHistLen) return;
+        this._prevPreHistLen = data.length;
+
+        this.preHistorySeries.setData(
+            data.length > 0
+                ? data as Parameters<typeof this.preHistorySeries.setData>[0]
+                : [],
+        );
     }
 
     setCrosshairPosition(time: Time): void {

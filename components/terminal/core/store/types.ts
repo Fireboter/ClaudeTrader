@@ -95,6 +95,13 @@ export interface StrategyConfig {
     mostValuableFilterCount: number;
 }
 
+// ─── Signal Config ───────────────────────────────────────────────
+export interface SignalConfig {
+    enabled:              boolean;
+    usePivotConfirmation: boolean;
+    useBreakoutDetection: boolean;
+}
+
 // ─── Sidebar selection state ────────────────────────────────────
 export type SelectedItemType =
     | 'indicator'

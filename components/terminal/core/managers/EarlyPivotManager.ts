@@ -37,6 +37,11 @@ export class EarlyPivotManager extends Observable {
     private _unsubLayout: (() => void) | null = null;
     private _recomputeDepth = 0;
 
+    // Cache for full historical scan (playbackTime === null mode).
+    // Only re-run when trendlines or recoilPct/zonePct change; scroll events are ignored.
+    private _historicalScanFp:    string       = '';
+    private _historicalConfirmed: EarlyPivot[] = [];
+
     constructor(
         market:       MarketDataStore,
         layout:       LayoutManager,
@@ -103,6 +108,8 @@ export class EarlyPivotManager extends Observable {
             const changed = this.provisionalPivots.length > 0 || this.confirmedEarlyPivots.length > 0;
             this.provisionalPivots    = [];
             this.confirmedEarlyPivots = [];
+            this._historicalScanFp    = '';
+            this._historicalConfirmed = [];
             if (changed) this.notify();
             return;
         }
@@ -118,11 +125,71 @@ export class EarlyPivotManager extends Observable {
             return;
         }
 
-        const days  = this._buildVisibleDays();
+        const days        = this._buildVisibleDays();
         if (days.length === 0) return;
 
-        const axisX       = days.length - 1;
+        const axisX        = days.length - 1;
         const playbackTime = this.layout.playbackTime;
+
+        // ── Free-scroll mode (playbackTime === null): full historical scan ─────
+        //
+        // When no playback cursor is active the chart shows ALL days. The
+        // incremental accumulator (scan-window logic below) only populates
+        // confirmed pivots for days the user has stepped through in playback.
+        // On chart load or after exiting playback, that means NO historical
+        // signals are shown. We fix this by iterating over every day index and
+        // running the filter causally (only data up to that day is "visible").
+        //
+        // The scan uses the current (final) trendline set. This is an acceptable
+        // approximation because high-score trendlines tend to be visible
+        // throughout their date range.
+        //
+        // To avoid re-scanning on every scroll event we cache the result keyed
+        // on trendline IDs + recoilPct + zonePct — these are the only inputs
+        // that affect which pivots are confirmed.
+        if (playbackTime === null) {
+            const allPivots = this.trendlineMgr.rawPivots;
+            const fp = [
+                zonePct.toFixed(6),
+                this.config.recoilPct,
+                this.trendlineMgr.pivotWindowSize,
+                allPivots.length,
+                allPivots[0]?.dayIndex ?? 0,
+                allPivots[allPivots.length - 1]?.dayIndex ?? 0,
+                JSON.stringify(this.trendlineMgr.config),
+            ].join('|');
+
+            if (fp !== this._historicalScanFp) {
+                this._historicalScanFp    = fp;
+                this._historicalConfirmed = this._runHistoricalScan(days, zonePct);
+            }
+
+            // Provisional: only last 2 days (same as always)
+            const fresh = this.filter.compute(
+                days, trendlines, this.config, zonePct, axisX, null,
+            );
+            const freshProvisional = this._buildProvisionalMap(fresh);
+
+            const provisionalKey     = (e: EarlyPivot) => `${e.trendlineId}|${e.dayIndex}|${e.type}`;
+            const oldProvisionalKeys = this.provisionalPivots.map(provisionalKey).sort().join(',');
+            const newProvisionalKeys = freshProvisional.map(provisionalKey).sort().join(',');
+            const provisionalChanged  = oldProvisionalKeys !== newProvisionalKeys;
+            const confirmedChanged    = this._historicalConfirmed !== this.confirmedEarlyPivots;
+
+            this.provisionalPivots    = freshProvisional;
+            this.confirmedEarlyPivots = this._historicalConfirmed;
+
+            if (confirmedChanged || provisionalChanged) {
+                this.notify();
+            }
+            return;
+        }
+
+        // ── Playback mode: incremental scan-window accumulation ───────────────
+        //
+        // Run the pure filter on the last 2 candles only. Confirmed pivots for
+        // days outside the scan window are kept permanently in
+        // confirmedEarlyPivots so rewinding in playback correctly reverts them.
 
         // Run the pure filter on the last 2 candles
         const fresh = this.filter.compute(
@@ -138,21 +205,7 @@ export class EarlyPivotManager extends Observable {
         // tightest resistance being tested), lowest for lows (tightest support).
         // This guarantees at most 4 provisional pivots at any time:
         //   2 types (high/low) × 2 days (current + previous).
-        const provisionalMap = new Map<string, EarlyPivot>();
-        for (const ep of fresh) {
-            if (ep.status !== 'provisional') continue;
-            const key      = `${ep.dayIndex}|${ep.type}`;
-            const existing = provisionalMap.get(key);
-            if (!existing) {
-                provisionalMap.set(key, ep);
-            } else {
-                const preferNew = ep.type === 'high'
-                    ? ep.touchPrice > existing.touchPrice   // highest resistance
-                    : ep.touchPrice < existing.touchPrice;  // lowest support
-                if (preferNew) provisionalMap.set(key, ep);
-            }
-        }
-        const freshProvisional = Array.from(provisionalMap.values());
+        const freshProvisional = this._buildProvisionalMap(fresh);
 
         // ── Scan-window-aware confirmed list management ───────────────────────
         //
@@ -207,6 +260,70 @@ export class EarlyPivotManager extends Observable {
         if (confirmedChanged || provisionalChanged) {
             this.notify();
         }
+    }
+
+    // ─── Historical scan helper ───────────────────────────────────────────────
+
+    /**
+     * Iterate over every day index [1, days.length-1] computing CAUSAL trendlines
+     * at each step — using only pivots visible at that day index (dayIndex ≤
+     * scanIdx - windowSize) and only market data up to that index.
+     *
+     * This ensures free-scroll mode shows the same early pivots that would have
+     * appeared during incremental playback at each step.
+     */
+    private _runHistoricalScan(days: DayCandle[], zonePct: number): EarlyPivot[] {
+        const confirmed:  EarlyPivot[] = [];
+        const seen        = new Set<string>();
+        const allPivots   = this.trendlineMgr.rawPivots;
+        const windowSize  = this.trendlineMgr.pivotWindowSize;
+
+        for (let scanIdx = 1; scanIdx < days.length; scanIdx++) {
+            // Only pivots causally visible at scanIdx (need windowSize future bars to confirm)
+            const causalPivots = allPivots.filter(p => p.dayIndex <= scanIdx - windowSize);
+            if (causalPivots.length < 2) continue;
+
+            const slicedDays = days.slice(0, scanIdx + 1);
+            const trendlines = this.trendlineMgr.computeForScan(slicedDays, causalPivots, scanIdx);
+            if (trendlines.length === 0) continue;
+
+            const eps = this.filter.compute(slicedDays, trendlines, this.config, zonePct, scanIdx, null);
+            for (const ep of eps) {
+                if (ep.status !== 'confirmed') continue;
+                const id = `${ep.trendlineId}|${ep.dayIndex}|${ep.type}`;
+                if (!seen.has(id)) {
+                    seen.add(id);
+                    confirmed.push(ep);
+                }
+            }
+        }
+
+        return confirmed;
+    }
+
+    // ─── Provisional dedup helper ─────────────────────────────────────────────
+
+    /**
+     * From a raw filter output, extract provisional pivots deduplicated to at
+     * most one per (dayIndex, type): highest touchPrice for highs (tightest
+     * resistance), lowest for lows (tightest support).
+     */
+    private _buildProvisionalMap(fresh: EarlyPivot[]): EarlyPivot[] {
+        const map = new Map<string, EarlyPivot>();
+        for (const ep of fresh) {
+            if (ep.status !== 'provisional') continue;
+            const key      = `${ep.dayIndex}|${ep.type}`;
+            const existing = map.get(key);
+            if (!existing) {
+                map.set(key, ep);
+            } else {
+                const preferNew = ep.type === 'high'
+                    ? ep.touchPrice > existing.touchPrice
+                    : ep.touchPrice < existing.touchPrice;
+                if (preferNew) map.set(key, ep);
+            }
+        }
+        return Array.from(map.values());
     }
 
     // ─── visibleDays builder (mirrors TrendlineManager._buildVisibleDays) ─────

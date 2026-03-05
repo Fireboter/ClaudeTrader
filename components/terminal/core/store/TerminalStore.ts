@@ -5,6 +5,7 @@ import { PlaybackManager } from '../managers/PlaybackManager';
 import { PivotManager } from '../managers/PivotManager';
 import { TrendlineManager } from '../managers/TrendlineManager';
 import { EarlyPivotManager } from '../managers/EarlyPivotManager';
+import { SignalManager } from '../managers/SignalManager';
 import { MarketDataStore } from './MarketDataStore';
 import {
     DEFAULT_CONFIG,
@@ -26,6 +27,7 @@ export class TerminalStore {
     pivotManager:      PivotManager;
     trendlineManager:  TrendlineManager;
     earlyPivotManager: EarlyPivotManager;
+    signalManager:     SignalManager;
 
     constructor() {
         this.marketData = new MarketDataStore();
@@ -50,11 +52,23 @@ export class TerminalStore {
         this.pivotManager.setEarlyPivotManager(this.earlyPivotManager);
         this.trendlineManager.setEarlyPivotManager(this.earlyPivotManager);
 
-        // Store-level bridge: when trendlines update, trigger early pivot recompute.
-        // This is a plain callback, NOT an Observable subscription on earlyPivotManager,
-        // so it does not cause a circular notify chain.
+        this.signalManager = new SignalManager(
+            this.marketData, this.layout, this.earlyPivotManager, this.trendlineManager,
+        );
+
+        // Store-level bridges: plain callbacks, NOT Observable subscriptions on
+        // earlyPivotManager/signalManager, so there is no circular notify chain.
+
+        // When trendlines update: (1) trigger early pivot recompute, (2) trigger signal recompute.
+        // SignalManager reads brokenTrendlines from TrendlineManager which are set before notify().
         this.trendlineManager.subscribe(() => {
             this.earlyPivotManager._recompute();
+            this.signalManager._recompute();
+        });
+
+        // When early pivots update (new confirmed pivots): trigger signal recompute.
+        this.earlyPivotManager.subscribe(() => {
+            this.signalManager._recompute();
         });
     }
 }

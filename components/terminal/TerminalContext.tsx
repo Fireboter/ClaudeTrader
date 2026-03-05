@@ -17,6 +17,7 @@ function buildApi(tick: number) {
     const pm     = terminalStore.pivotManager;
     const tm     = terminalStore.trendlineManager;
     const epm    = terminalStore.earlyPivotManager;
+    const sm     = terminalStore.signalManager;
 
     // Stable method references (closures over singletons — references never change)
     const methods = {
@@ -90,6 +91,10 @@ function buildApi(tick: number) {
             earlyPivots:           epm.provisionalPivots,
             earlyConfirmedPivots:  epm.confirmedEarlyPivots,
             earlyPivotConfig:      epm.config,
+
+            // ── Signal state ─────────────────────────────────────────────────
+            signals:     sm.signals,
+            activeTrade: sm.activeTrade,
         },
         ...methods,
     };
@@ -111,6 +116,7 @@ export function TerminalProvider({ children }: { children: React.ReactNode }) {
             terminalStore.pivotManager.subscribe(bump),
             terminalStore.trendlineManager.subscribe(bump),
             terminalStore.earlyPivotManager.subscribe(bump),
+            terminalStore.signalManager.subscribe(bump),
         ];
         return () => unsubs.forEach(u => u());
     }, []);

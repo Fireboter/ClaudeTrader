@@ -17,9 +17,16 @@ import type { EarlyPivotManager } from './EarlyPivotManager';
 export class TrendlineManager extends Observable {
 
     // ─── Public state ─────────────────────────────────────────────────────────
-    trendlines: Trendline[] = [];
-    enabled:    boolean     = false;
-    config:     TrendlineConfig = { ...DEFAULT_TRENDLINE_CONFIG };
+    trendlines:      Trendline[] = [];
+    enabled:         boolean     = false;
+    config:          TrendlineConfig = { ...DEFAULT_TRENDLINE_CONFIG };
+
+    /**
+     * Trendlines that were present in the previous recompute but absent from the
+     * current one. SignalManager reads this to detect breakout entries.
+     * Reset on every _recompute() call.
+     */
+    brokenTrendlines: Map<string, { type: 'resistance' | 'support'; slope: number; intercept: number }> = new Map();
 
     // ─── Private ──────────────────────────────────────────────────────────────
     private market:            MarketDataStore;
@@ -76,9 +83,42 @@ export class TrendlineManager extends Observable {
         this._unsubPivots?.();
     }
 
+    // ─── Accessors for EarlyPivotManager's causal historical scan ─────────────
+
+    /**
+     * All confirmed window-size pivots from PivotManager.
+     * Used by EarlyPivotManager._runHistoricalScan() to compute causal trendlines
+     * at each scan step (instead of reusing the single final trendline set).
+     */
+    get rawPivots(): Pivot[] {
+        return this.pivotManager.pivots;
+    }
+
+    /**
+     * The pivot confirmation window size from PivotManager.
+     * Used by EarlyPivotManager._runHistoricalScan() to filter causal pivots.
+     */
+    get pivotWindowSize(): number {
+        return this.pivotManager.windowSize;
+    }
+
+    /**
+     * Run TrendlineFilter for an arbitrary (sliced) dataset.
+     * Called by EarlyPivotManager during the historical scan so each step uses
+     * the trendlines that were causally visible at that day index.
+     */
+    computeForScan(days: DayCandle[], pivots: Pivot[], axisX: number): Trendline[] {
+        if (!this.enabled || days.length === 0 || pivots.length < 2) return [];
+        return this.filter.compute(days, pivots, axisX, this.config);
+    }
+
     // ─── Private ─────────────────────────────────────────────────────────────
 
     private _recompute(): void {
+        // Always reset broken trendlines at the start of each recompute.
+        // Populated below by diffing prev vs new trendline sets.
+        this.brokenTrendlines = new Map();
+
         if (!this.enabled) {
             if (this.trendlines.length > 0) {
                 this.trendlines = [];
@@ -125,8 +165,25 @@ export class TrendlineManager extends Observable {
 
         const axisX = days.length - 1;
 
+        const prevTrendlines = this.trendlines;
         this.trendlines = this.filter.compute(days, combinedPivots, axisX, this.config);
-        this.notify();
+
+        // Detect trendlines removed in this recompute step (for breakout detection)
+        const newIdSet = new Set(this.trendlines.map(t => t.id));
+        for (const tl of prevTrendlines) {
+            if (!newIdSet.has(tl.id)) {
+                this.brokenTrendlines.set(tl.id, { type: tl.type, slope: tl.slope, intercept: tl.intercept });
+            }
+        }
+
+        // Only notify when trendlines actually changed or a breakout was detected.
+        // During playback most steps produce identical trendlines; skipping the
+        // notify prevents the store bridge from double-calling SignalManager._recompute().
+        const prevIdStr = prevTrendlines.map(t => t.id).sort().join(',');
+        const newIdStr  = this.trendlines.map(t => t.id).sort().join(',');
+        if (prevIdStr !== newIdStr || this.brokenTrendlines.size > 0) {
+            this.notify();
+        }
     }
 
     /**

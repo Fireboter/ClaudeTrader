@@ -4,29 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useTerminal } from '../TerminalContext';
 import { Play, TrendingUp, TrendingDown, DollarSign, Percent, Activity } from 'lucide-react';
 import { createChart, IChartApi, LineSeries, Time } from 'lightweight-charts';
-import axios from 'axios';
-
-// ─── Types ──────────────────────────────────────────────────────
-
-interface Trade {
-    id: string;
-    type: 'long' | 'short';
-    entryPrice: number;
-    exitPrice?: number;
-    entryTime: number;
-    exitTime?: number;
-    pnl?: number;
-    status: 'active' | 'closed';
-}
-
-interface BacktestStats {
-    total_return: number;
-    win_rate: number;
-    total_trades: number;
-    max_drawdown: number;
-    sharpe_ratio: number;
-    profit_factor: number;
-}
+import { runBacktestSimulation, type BacktestTrade, type BacktestStats } from '../core/backtest/backtestEngine';
 
 // ─── Sub-components ─────────────────────────────────────────────
 
@@ -68,7 +46,7 @@ function EquityChart({ data }: { data: { time: Time; value: number }[] }) {
     return <div ref={containerRef} className="h-full w-full" />;
 }
 
-function TradesTable({ trades }: { trades: Trade[] }) {
+function TradesTable({ trades }: { trades: BacktestTrade[] }) {
     if (trades.length === 0) {
         return <div className="flex items-center justify-center h-full text-slate-500 text-sm">No trades yet. Run a backtest to see results.</div>;
     }
@@ -115,16 +93,20 @@ function TradesTable({ trades }: { trades: Trade[] }) {
 // ─── Main BottomBar ─────────────────────────────────────────────
 
 export default function BottomBar() {
-    const { state } = useTerminal();
-    const { config, tradeAxisConfig, strategyConfig, enabledIndicators } = state;
+    const terminal = useTerminal();
+    const { state } = terminal;
+    const {
+        tradeAxisConfig, strategyConfig, enabledIndicators,
+        trendlineConfig, earlyPivotConfig,
+    } = state;
 
     const [isRunning, setIsRunning] = useState(false);
-    const [trades, setTrades] = useState<Trade[]>([]);
+    const [trades, setTrades] = useState<BacktestTrade[]>([]);
     const [equityCurve, setEquityCurve] = useState<{ time: Time; value: number }[]>([]);
     const [stats, setStats] = useState<BacktestStats | null>(null);
     const [backtestError, setBacktestError] = useState<string | null>(null);
 
-    const runBacktest = async () => {
+    const runBacktest = () => {
         setIsRunning(true);
         setBacktestError(null);
 
@@ -133,28 +115,24 @@ export default function BottomBar() {
                 throw new Error('Enable Signals in Strategy to run a signals backtest.');
             }
 
-            let durationDays = 365;
-            if (config.mode === 'random') {
-                durationDays = (config.years * 365) + (config.months * 30) + config.days;
+            const market = terminal.store.marketData;
+            if (market.days.length === 0) {
+                throw new Error('No market data loaded. Load a chart first.');
             }
 
-            const analyzeRes = await axios.post('http://localhost:8000/api/tradeaxis/analyze', {
-                symbol: config.symbol,
-                resolution: '1m',
-                window: tradeAxisConfig.windowSize,
-                tolerance: tradeAxisConfig.tolerance,
-                start_date: config.mode === 'fixed' ? config.startDate : undefined,
-                end_date: config.mode === 'fixed' ? config.endDate : undefined,
-                mode: config.mode,
-                duration_days: durationDays,
-            });
+            const result = runBacktestSimulation(
+                market.days,
+                market.preHistoryCount,
+                tradeAxisConfig,
+                strategyConfig,
+                trendlineConfig,
+                { enabled: true, usePivotConfirmation: true, useBreakoutDetection: false },
+                earlyPivotConfig,
+            );
 
-            const taData = analyzeRes.data.data;
-            if (!taData || taData.length === 0) throw new Error('No data returned for Trade Axis');
-
-            // Results will be processed when backtest modules are integrated
-            // For now show a placeholder
-            setBacktestError('Backtest logic (simulationLogic / dashboardAdapter) not yet integrated. Data was fetched successfully.');
+            setTrades(result.trades);
+            setEquityCurve(result.equityCurve);
+            setStats(result.stats);
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Backtest failed.';
             setBacktestError(message);
